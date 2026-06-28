@@ -8,6 +8,49 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ─── yt-dlp Cookie Authentication (for restricted videos) ────────
+// Set COOKIES_FILE=/path/to/cookies.txt  OR  COOKIES_BROWSER=chrome|firefox|edge
+// in your environment to authenticate with your YouTube account.
+const COOKIES_FILE    = process.env.COOKIES_FILE    || '';
+const COOKIES_BROWSER = process.env.COOKIES_BROWSER || '';
+
+/**
+ * Returns cookie args if configured, empty array otherwise.
+ * We do NOT override player_client here — yt-dlp's default
+ * (android_vr) already works best for most videos.
+ */
+function cookieArgs() {
+  if (COOKIES_FILE && fs.existsSync(COOKIES_FILE)) {
+    console.log('[AUTH] Using cookies file:', COOKIES_FILE);
+    return ['--cookies', COOKIES_FILE];
+  }
+  if (COOKIES_BROWSER) {
+    console.log('[AUTH] Using browser cookies from:', COOKIES_BROWSER);
+    return ['--cookies-from-browser', COOKIES_BROWSER];
+  }
+  return [];
+}
+
+/** True if stderr indicates YouTube bot/sign-in detection */
+function isBotError(stderr) {
+  return stderr.includes('Sign in') ||
+         stderr.includes('bot') ||
+         stderr.includes('not available') ||
+         stderr.includes('Requested format');
+}
+
+/** Run yt-dlp and return { stdout, stderr, code } */
+function runYtDlp(args) {
+  return new Promise((resolve) => {
+    const proc = spawn('yt-dlp', args);
+    let stdout = '', stderr = '';
+    proc.stdout.on('data', c => { stdout += c.toString(); });
+    proc.stderr.on('data', c => { stderr += c.toString(); });
+    proc.on('close', code => resolve({ stdout, stderr, code }));
+    proc.on('error', err => resolve({ stdout: '', stderr: err.message, code: 1 }));
+  });
+}
+
 // ─── Ensure temp directory exists ───────────────────────────────
 const TEMP_DIR = path.join(__dirname, '.downloads');
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
@@ -51,7 +94,7 @@ function isValidYouTubeUrl(url) {
 const activeDownloads = new Map();
 
 // ─── GET /api/info — Fetch video metadata ───────────────────────
-app.get('/api/info', (req, res) => {
+app.get('/api/info', async (req, res) => {
   const { url } = req.query;
 
   if (!url || !isValidYouTubeUrl(url)) {
@@ -60,72 +103,78 @@ app.get('/api/info', (req, res) => {
 
   console.log(`[INFO] Fetching info for: ${url}`);
 
-  const ytdlp = spawn('yt-dlp', [
-    '--dump-json',
-    '--no-warnings',
-    '--no-playlist',
-    url,
-  ]);
+  const baseArgs = ['--dump-json', '--no-warnings', '--no-playlist'];
 
-  let stdout = '';
-  let stderr = '';
+  // Attempt 1: default (yt-dlp picks best client automatically)
+  let result = await runYtDlp([...baseArgs, ...cookieArgs(), url]);
 
-  ytdlp.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
-  ytdlp.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+  // Attempt 2: if bot/sign-in error and no cookies set, try mweb client
+  if (result.code !== 0 && isBotError(result.stderr)) {
+    console.warn('[INFO] Bot detection hit, retrying with mweb client...');
+    result = await runYtDlp([
+      ...baseArgs,
+      '--extractor-args', 'youtube:player_client=mweb,web',
+      ...cookieArgs(),
+      url,
+    ]);
+  }
 
-  ytdlp.on('close', (code) => {
-    if (code !== 0) {
-      console.error('[INFO] yt-dlp error:', stderr);
-      return res.status(500).json({ error: 'Failed to fetch video info. ' + (stderr || '') });
+  if (result.code !== 0) {
+    console.error('[INFO] yt-dlp error:', result.stderr);
+    let errMsg = result.stderr || 'Unknown error';
+    if (errMsg.includes('Sign in') || errMsg.includes('bot')) {
+      errMsg = 'This video requires YouTube sign-in. Set the environment variable COOKIES_BROWSER=chrome (or firefox/edge) to authenticate.';
+    } else if (errMsg.includes('not available') || errMsg.includes('Requested format')) {
+      errMsg = 'This video is age-restricted or unavailable in your region. Set COOKIES_BROWSER=chrome in your environment.';
+    } else if (errMsg.includes('Private video')) {
+      errMsg = 'This video is private.';
+    } else if (errMsg.includes('Video unavailable')) {
+      errMsg = 'This video is unavailable.';
     }
+    return res.status(500).json({ error: 'Failed to fetch video info. ' + errMsg });
+  }
 
-    try {
-      const info = JSON.parse(stdout);
+  try {
+    const info = JSON.parse(result.stdout);
 
-      // Find max available height
-      let maxHeight = 0;
-      if (info.formats) {
-        for (const f of info.formats) {
-          if (f.height && f.height > maxHeight) maxHeight = f.height;
-        }
+    // Find max available height
+    let maxHeight = 0;
+    if (info.formats) {
+      for (const f of info.formats) {
+        if (f.height && f.height > maxHeight) maxHeight = f.height;
       }
-
-      // Standard quality presets — only show what's available
-      const allPresets = [
-        { label: 'Best Quality', height: 99999, format: 'bestvideo+bestaudio/best' },
-        { label: '4K (2160p)', height: 2160, format: 'bestvideo[height<=2160]+bestaudio/best[height<=2160]' },
-        { label: '1440p (2K)', height: 1440, format: 'bestvideo[height<=1440]+bestaudio/best[height<=1440]' },
-        { label: '1080p (Full HD)', height: 1080, format: 'bestvideo[height<=1080]+bestaudio/best[height<=1080]' },
-        { label: '720p (HD)', height: 720, format: 'bestvideo[height<=720]+bestaudio/best[height<=720]' },
-        { label: '480p', height: 480, format: 'bestvideo[height<=480]+bestaudio/best[height<=480]' },
-        { label: '360p', height: 360, format: 'bestvideo[height<=360]+bestaudio/best[height<=360]' },
-      ];
-
-      const qualities = allPresets.filter(p => p.height > maxHeight ? p.label === 'Best Quality' : p.height <= maxHeight);
-
-      const result = {
-        id: info.id,
-        title: info.title || info.fulltitle || 'Unknown',
-        thumbnail: info.thumbnail || info.thumbnails?.[info.thumbnails.length - 1]?.url || '',
-        duration: info.duration || 0,
-        duration_string: info.duration_string || formatDuration(info.duration || 0),
-        uploader: info.uploader || info.channel || 'Unknown',
-        view_count: info.view_count || 0,
-        qualities,
-      };
-
-      console.log(`[INFO] Success: "${result.title}" (${qualities.length} quality options)`);
-      res.json(result);
-    } catch (e) {
-      console.error('[INFO] JSON parse error:', e.message);
-      res.status(500).json({ error: 'Failed to parse video info' });
     }
-  });
 
-  ytdlp.on('error', (err) => {
-    console.error('[INFO] yt-dlp spawn error:', err.message);
-    res.status(500).json({ error: 'yt-dlp not found. Make sure it is installed and in PATH.' });
-  });
+    // Standard quality presets — only show what's available
+    const allPresets = [
+      { label: 'Best Quality', height: 99999, format: 'bestvideo+bestaudio/best' },
+      { label: '4K (2160p)', height: 2160, format: 'bestvideo[height<=2160]+bestaudio/best[height<=2160]' },
+      { label: '1440p (2K)', height: 1440, format: 'bestvideo[height<=1440]+bestaudio/best[height<=1440]' },
+      { label: '1080p (Full HD)', height: 1080, format: 'bestvideo[height<=1080]+bestaudio/best[height<=1080]' },
+      { label: '720p (HD)', height: 720, format: 'bestvideo[height<=720]+bestaudio/best[height<=720]' },
+      { label: '480p', height: 480, format: 'bestvideo[height<=480]+bestaudio/best[height<=480]' },
+      { label: '360p', height: 360, format: 'bestvideo[height<=360]+bestaudio/best[height<=360]' },
+    ];
+
+    const qualities = allPresets.filter(p => p.height > maxHeight ? p.label === 'Best Quality' : p.height <= maxHeight);
+
+    const videoInfo = {
+      id: info.id,
+      title: info.title || info.fulltitle || 'Unknown',
+      thumbnail: info.thumbnail || info.thumbnails?.[info.thumbnails.length - 1]?.url || '',
+      duration: info.duration || 0,
+      duration_string: info.duration_string || formatDuration(info.duration || 0),
+      uploader: info.uploader || info.channel || 'Unknown',
+      view_count: info.view_count || 0,
+      qualities,
+    };
+
+    console.log(`[INFO] Success: "${videoInfo.title}" (${qualities.length} quality options)`);
+    res.json(videoInfo);
+  } catch (e) {
+    console.error('[INFO] JSON parse error:', e.message);
+    res.status(500).json({ error: 'Failed to parse video info' });
+  }
 });
 
 // ─── POST /api/prepare — Start download to temp file ────────────
@@ -155,6 +204,7 @@ app.post('/api/prepare', express.json(), (req, res) => {
       '--no-warnings',
       '--no-playlist',
       '--newline',
+      ...cookieArgs(),
       '-o', tmpPath.replace('.mp3', '.%(ext)s'),
       url,
     ];
@@ -166,6 +216,7 @@ app.post('/api/prepare', express.json(), (req, res) => {
       '--no-warnings',
       '--no-playlist',
       '--newline',
+      ...cookieArgs(),
       '-o', tmpPath,
       url,
     ];
