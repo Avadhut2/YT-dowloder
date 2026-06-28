@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="TubeGrab — Download YouTube videos and MP3 audio fast.">
+  <title>TubeGrab</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <main class="container">
+    <header class="header">
+      <div class="brand">
+        <span class="brand-icon">▶</span>
+        <h1>TubeGrab</h1>
+      </div>
+      <p class="subtitle">Paste a link. Pick quality. Download instantly.</p>
+    </header>
+
+    <!-- URL Input -->
+    <div class="url-bar" id="url-bar">
+      <input
+        type="url"
+        id="url-input"
+        placeholder="https://www.youtube.com/watch?v=..."
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <button id="fetch-btn" type="button">
+        <span class="btn-label">Fetch</span>
+        <span class="btn-spinner" hidden></span>
+      </button>
+    </div>
+
+    <!-- Video Card -->
+    <section class="video-card" id="video-section" hidden>
+      <div class="thumb-wrap">
+        <img id="video-thumbnail" src="" alt="" />
+        <span class="duration-badge" id="video-duration"></span>
+      </div>
+      <div class="video-body">
+        <h2 id="video-title"></h2>
+        <div class="meta-row">
+          <span class="tag tag-channel" id="video-uploader"></span>
+          <span class="tag tag-views" id="video-views"></span>
+        </div>
+
+        <div class="control-group">
+          <label for="quality-select">Quality</label>
+          <select id="quality-select"></select>
+        </div>
+
+        <div class="actions">
+          <button id="download-video-btn" class="dl-btn dl-video" type="button">
+            ↓ Download MP4
+          </button>
+          <button id="download-mp3-btn" class="dl-btn dl-audio" type="button">
+            ♫ Download MP3
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <footer class="footer">
+      Built for speed — no ads, no tracking, no nonsense.
+    </footer>
+  </main>
+
+  <div class="toasts" id="toast-container"></div>
+  <script src="app.js"></script>
+</body>
+</html>

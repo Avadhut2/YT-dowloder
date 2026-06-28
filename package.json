@@ -1,0 +1,16 @@
+{
+  "name": "tubegrab",
+  "version": "1.0.0",
+  "description": "Ultra-fast YouTube video downloader with quality selection and MP3 support",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": ["youtube", "downloader", "video", "mp3"],
+  "license": "MIT",
+  "dependencies": {
+    "express": "^5.1.0",
+    "cors": "^2.8.5"
+  }
+}
